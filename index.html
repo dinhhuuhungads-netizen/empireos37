@@ -1955,23 +1955,45 @@ function _log(...a){if(_DBG){try{console.log(...a);}catch(_){}}}
 // fetch() does NOT receive this signal — stop is via isStopping flag only.
 let GLOBAL_ABORT_CTRL = null;
 
-// ── V36 DEPLOY CONFIG ─────────────────────────────────────────────────────
-// 'offline' → instant mock results, zero network calls (default / safe mode)
-// 'proxy'   → real AI via your server at /api/ai — NO API key in HTML ever
+// ── V38 DEPLOY CONFIG + AUTO ENGINE DETECTION ────────────────────────────
+// detectEngine() runs at startup and auto-sets API_MODE:
+//   'proxy'   → hostname matches vercel.app / localhost / 127.0.0.1 / custom
+//   'offline' → all other hosts (file://, unknown, etc.)
 //
-// DEPLOY TARGETS (all use relative path /api/ai — no absolute URLs):
-//   Vercel  → api/ai.js (serverless function)
-//   Netlify → netlify/functions/ai.js
-//   Local   → localhost:3000/api/ai (Express / Fastify)
+// PROXY TARGET: POST /api/ai { prompt, maxTokens, stage, model }
+//               returns JSON { text: '...' }
+// Keep ALL real API keys in api/ai.js (server-side). Never in this file.
 //
-// Your server must accept: POST /api/ai { prompt, maxTokens, stage, model }
-// and return:             JSON { text: '...' }
-// Keep ALL real API keys server-side only. Never put them in this file.
-//
-// Fallback chain: proxy fails/times out → auto-fallback to offline mock
-var API_MODE = 'offline'; // ← change to 'proxy' to enable live AI calls
-var PROXY_URL = '/api/ai'; // ← relative path: works on Vercel/Netlify/localhost
-var PROXY_TIMEOUT_MS = 15000; // ← 15s timeout before fallback to offline
+// Fallback chain: proxy fails / times out → auto-fallback to offline mock
+
+var API_MODE        = 'offline'; // auto-set by detectEngine() at DOMContentLoaded
+var PROXY_URL       = '/api/ai'; // relative — works on Vercel / localhost
+var PROXY_TIMEOUT_MS = 55000;    // 55s: safe under Vercel Pro 60s limit
+
+// ── Online hostnames — add custom domain here if needed ──────────────────
+var ONLINE_HOSTS = [
+  'vercel.app',
+  'localhost',
+  '127.0.0.1'
+];
+
+/* detectEngine()
+   Reads window.location.hostname and sets API_MODE accordingly.
+   Called once at DOMContentLoaded — before E.init().
+   Safe: never throws, falls back to 'offline' on any error.
+   Returns the detected mode string for logging. */
+function detectEngine(){
+  try{
+    var host = (window.location.hostname || '').toLowerCase();
+    var isOnline = ONLINE_HOSTS.some(function(h){
+      return host === h || host.endsWith('.'+h) || host.indexOf(h) >= 0;
+    });
+    API_MODE = isOnline ? 'proxy' : 'offline';
+  }catch(_){
+    API_MODE = 'offline';
+  }
+  return API_MODE;
+}
 
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -2657,15 +2679,19 @@ async function _callAI_proxy(prompt, _model, maxTokens, log){
   return text;
 }
 
-// ── V37 LOCKED callAI — always returns text, never throws to caller ──────────
-// Routes: proxy → offline fallback. Never calls API directly. No key in HTML.
+// ── V38 callAI — auto-routes proxy/offline based on detectEngine() ──────────
+// API_MODE is set by detectEngine() at DOMContentLoaded.
+// proxy  → POST /api/ai → real AI → fallback offline on any error
+// offline → instant mock, zero network
 // Guard: isStopping check before and after. try/catch at every level.
 async function callAI(prompt, _model, maxTokens, onLog){
   var log = onLog || function(){};
-  // V37: pre-check stop flag
+  // Pre-check stop flag
   try{ if(E.state&&E.state.isStopping){ log('[STOPPED] callAI skipped — isStopping=true','warn'); return ''; } }catch(_){}
 
+  // Read API_MODE fresh each call (detectEngine may have updated it)
   var mode = (typeof API_MODE !== 'undefined') ? String(API_MODE).toLowerCase() : 'offline';
+  log('[callAI] mode='+mode+' host='+window.location.hostname, 'info');
   var text = '';
 
   try{
@@ -2681,12 +2707,11 @@ async function callAI(prompt, _model, maxTokens, onLog){
       try{ text = await _callAI_offline(prompt, log); }catch(offErr){ text='[OFFLINE ERROR]'; log('[OFFLINE] '+offErr.message,'error'); }
     }
   }catch(outerErr){
-    // V37 global guard — never crash pipeline
     log('[callAI] Outer error caught: '+(outerErr&&outerErr.message),'error');
     text = text || '';
   }
 
-  // V37: post-check stop flag — discard result if stopped mid-flight
+  // Post-check stop flag — discard result if stopped mid-flight
   try{ if(E.state&&E.state.isStopping){ log('[STOPPED] callAI result discarded — isStopping=true','warn'); return ''; } }catch(_){}
 
   try{ E.state.callCount++; E.updateStats(); }catch(_){}
@@ -4357,6 +4382,12 @@ function _checkAutoResume(){
   }catch(_){}
 }
 document.addEventListener('DOMContentLoaded',()=>{
+  // V38: auto-detect engine mode FIRST — sets API_MODE before E.init()
+  try{
+    var detectedMode = detectEngine();
+    _log('[V38] detectEngine() → API_MODE='+detectedMode+' (host='+window.location.hostname+')');
+  }catch(e){ _log('detectEngine error:',e); }
+
   // Init main engine
   try{E.init();}catch(e){_log('E.init error:',e);}
 
