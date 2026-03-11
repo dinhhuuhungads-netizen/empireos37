@@ -1,26 +1,23 @@
-// ╔══════════════════════════════════════════════════════════════════════╗
-// ║  /api/ai.js  —  Universal AI Proxy for Vercel                      ║
-// ║  Providers: Gemini · OpenAI · Claude · OpenRouter · Groq           ║
-// ║  POST { prompt, provider } → { text }                              ║
-// ╚══════════════════════════════════════════════════════════════════════╝
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  /api/ai.js — Universal AI Proxy · Vercel Serverless                   ║
+// ║  Providers : gemini · openai · claude · openrouter · groq              ║
+// ║  Fallback  : auto-tries next provider if primary fails                 ║
+// ║  Returns   : { text }  — never throws 500 to client                    ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
 
-export const config = {
-  maxDuration: 60, // seconds — increase to 300 on Vercel Pro if needed
-};
+export const config = { maxDuration: 60 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PROVIDER DEFINITIONS
-// Each entry: envKey, buildRequest(prompt, key), extractText(data)
-// To add a new provider: append one object here — nothing else to change.
+// Each entry: envKey · buildRequest(prompt, key) · extractText(data)
 // ─────────────────────────────────────────────────────────────────────────────
 const PROVIDERS = {
 
-  // ── Google Gemini ─────────────────────────────────────────────────────────
   gemini: {
     envKey: 'GEMINI_API_KEY',
     buildRequest(prompt, key) {
       return {
-        url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,
+        url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
@@ -32,7 +29,49 @@ const PROVIDERS = {
     },
   },
 
-  // ── OpenAI ────────────────────────────────────────────────────────────────
+  openrouter: {
+    envKey: 'OPENROUTER_API_KEY',
+    buildRequest(prompt, key) {
+      return {
+        url: 'https://openrouter.ai/api/v1/chat/completions',
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${key}`,
+          'HTTP-Referer':  'https://vercel.app',
+          'X-Title':       'AI Proxy',
+        },
+        body: JSON.stringify({
+          model:    'openai/gpt-4o-mini',
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      };
+    },
+    extractText(data) {
+      return data?.choices?.[0]?.message?.content ?? '';
+    },
+  },
+
+  groq: {
+    envKey: 'GROQ_API_KEY',
+    buildRequest(prompt, key) {
+      return {
+        url: 'https://api.groq.com/openai/v1/chat/completions',
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          model:      'llama3-8b-8192',
+          max_tokens: 4096,
+          messages:   [{ role: 'user', content: prompt }],
+        }),
+      };
+    },
+    extractText(data) {
+      return data?.choices?.[0]?.message?.content ?? '';
+    },
+  },
+
   openai: {
     envKey: 'OPENAI_API_KEY',
     buildRequest(prompt, key) {
@@ -54,7 +93,6 @@ const PROVIDERS = {
     },
   },
 
-  // ── Anthropic Claude ──────────────────────────────────────────────────────
   claude: {
     envKey: 'ANTHROPIC_API_KEY',
     buildRequest(prompt, key) {
@@ -66,7 +104,7 @@ const PROVIDERS = {
           'anthropic-version': '2023-06-01',
         },
         body: JSON.stringify({
-          model:      'claude-3-5-sonnet-20240620',
+          model:      'claude-3-haiku-20240307',
           max_tokens: 4096,
           messages:   [{ role: 'user', content: prompt }],
         }),
@@ -78,67 +116,65 @@ const PROVIDERS = {
       return block?.text ?? '';
     },
   },
-
-  // ── OpenRouter ────────────────────────────────────────────────────────────
-  openrouter: {
-    envKey: 'OPENROUTER_API_KEY',
-    buildRequest(prompt, key) {
-      return {
-        url: 'https://openrouter.ai/api/v1/chat/completions',
-        headers: {
-          'Content-Type':  'application/json',
-          'Authorization': `Bearer ${key}`,
-          'HTTP-Referer':  'https://vercel.app',
-          'X-Title':       'AI Proxy',
-        },
-        body: JSON.stringify({
-          model:    'google/gemini-2.0-flash-exp:free',
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      };
-    },
-    extractText(data) {
-      return data?.choices?.[0]?.message?.content ?? '';
-    },
-  },
-
-  // ── Groq ──────────────────────────────────────────────────────────────────
-  groq: {
-    envKey: 'GROQ_API_KEY',
-    buildRequest(prompt, key) {
-      return {
-        url: 'https://api.groq.com/openai/v1/chat/completions',
-        headers: {
-          'Content-Type':  'application/json',
-          'Authorization': `Bearer ${key}`,
-        },
-        body: JSON.stringify({
-          model:      'llama-3.3-70b-versatile',
-          max_tokens: 4096,
-          messages:   [{ role: 'user', content: prompt }],
-        }),
-      };
-    },
-    extractText(data) {
-      return data?.choices?.[0]?.message?.content ?? '';
-    },
-  },
 };
+
+// Fallback order when primary provider fails
+const FALLBACK_ORDER = ['gemini', 'openrouter', 'groq', 'openai', 'claude'];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// callProvider — attempt one provider, return { text } or throw
+// ─────────────────────────────────────────────────────────────────────────────
+async function callProvider(providerName, prompt) {
+  const def = PROVIDERS[providerName];
+  if (!def) throw new Error(`Unknown provider: ${providerName}`);
+
+  const key = process.env[def.envKey];
+  if (!key) throw new Error(`${def.envKey} not set`);
+
+  const cfg = def.buildRequest(prompt, key);
+
+  const rawRes = await fetch(cfg.url, {
+    method:  'POST',
+    headers: cfg.headers,
+    body:    cfg.body,
+  });
+
+  if (!rawRes.ok) {
+    let detail = `HTTP ${rawRes.status}`;
+    try {
+      const j = await rawRes.json();
+      detail =
+        j?.error?.message  ??
+        j?.error?.status   ??
+        j?.message         ??
+        JSON.stringify(j).slice(0, 120);
+    } catch (_) {}
+    throw new Error(`${providerName} API error: ${detail}`);
+  }
+
+  const data = await rawRes.json();
+  const text = def.extractText(data) ?? '';
+
+  if (!text.trim()) {
+    throw new Error(`${providerName} returned empty content`);
+  }
+
+  return text;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HANDLER
 // ─────────────────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
 
-  // CORS — tighten to your domain in production if needed
+  // CORS
   res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST')    return res.status(405).json({ error: 'Method Not Allowed — use POST' });
 
-  // ── 1. Parse body ──────────────────────────────────────────────────────────
+  // Parse body
   let body;
   try {
     body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
@@ -150,77 +186,41 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Request body must be a JSON object' });
   }
 
-  // ── 2. Validate inputs ────────────────────────────────────────────────────
-  const prompt   = typeof body.prompt   === 'string' ? body.prompt.trim()            : '';
-  const provider = typeof body.provider === 'string' ? body.provider.trim().toLowerCase() : 'claude';
-
+  const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
   if (!prompt) {
-    return res.status(400).json({ error: 'Missing required field: prompt (non-empty string)' });
+    return res.status(400).json({ error: 'Missing required field: prompt' });
   }
 
-  // ── 3. Resolve provider ───────────────────────────────────────────────────
-  const def = PROVIDERS[provider];
-  if (!def) {
-    return res.status(400).json({
-      error: `Unknown provider "${provider}". Supported: ${Object.keys(PROVIDERS).join(', ')}`,
-    });
-  }
+  // Build the attempt order: requested provider first, then fallbacks
+  const requested = typeof body.provider === 'string'
+    ? body.provider.trim().toLowerCase()
+    : 'gemini';
 
-  // ── 4. Resolve API key ────────────────────────────────────────────────────
-  const key = process.env[def.envKey];
-  if (!key) {
-    return res.status(500).json({
-      error: `Server misconfiguration: env var "${def.envKey}" is not set in Vercel Environment Variables`,
-    });
-  }
+  const attemptOrder = [
+    requested,
+    ...FALLBACK_ORDER.filter(p => p !== requested),
+  ];
 
-  // ── 5. Build + fire request ───────────────────────────────────────────────
-  let cfg, rawRes;
-  try {
-    cfg    = def.buildRequest(prompt, key);
-    rawRes = await fetch(cfg.url, { method: 'POST', headers: cfg.headers, body: cfg.body });
-  } catch (e) {
-    return res.status(502).json({ error: `Network error calling ${provider}: ${e.message}` });
-  }
+  // Try each provider in order — never throw to client
+  const errors = [];
 
-  // ── 6. Handle upstream errors ─────────────────────────────────────────────
-  if (!rawRes.ok) {
-    let detail = `HTTP ${rawRes.status}`;
+  for (const providerName of attemptOrder) {
+    if (!PROVIDERS[providerName]) continue;
+
     try {
-      const j = await rawRes.json();
-      // Normalise across different provider error shapes
-      detail =
-        j?.error?.message    ??   // OpenAI / Claude / Groq
-        j?.error?.status     ??   // OpenRouter
-        j?.message           ??   // generic REST
-        j?.status_message    ??   // some providers
-        JSON.stringify(j).slice(0, 200);
-    } catch (_) { /* keep HTTP status string */ }
-    return res.status(502).json({ error: `${provider} API error: ${detail}` });
+      const text = await callProvider(providerName, prompt);
+      // Success — return which provider was used for debugging
+      return res.status(200).json({ text, provider: providerName });
+    } catch (e) {
+      errors.push(`[${providerName}] ${e.message}`);
+      // Continue to next provider
+    }
   }
 
-  // ── 7. Parse response ─────────────────────────────────────────────────────
-  let data;
-  try {
-    data = await rawRes.json();
-  } catch (e) {
-    return res.status(502).json({ error: `Failed to parse ${provider} response: ${e.message}` });
-  }
-
-  // ── 8. Extract text ───────────────────────────────────────────────────────
-  let text = '';
-  try {
-    text = def.extractText(data) ?? '';
-  } catch (e) {
-    return res.status(502).json({ error: `Failed to read text from ${provider} response: ${e.message}` });
-  }
-
-  if (!text.trim()) {
-    return res.status(502).json({
-      error: `${provider} returned empty content. Raw: ${JSON.stringify(data).slice(0, 300)}`,
-    });
-  }
-
-  // ── 9. Return ─────────────────────────────────────────────────────────────
-  return res.status(200).json({ text });
+  // All providers failed — return last-resort fallback text, never a raw 500
+  return res.status(200).json({
+    text: `All AI providers failed. Errors: ${errors.join(' | ')}`,
+    provider: 'none',
+    errors,
+  });
 }
