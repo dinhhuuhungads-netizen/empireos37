@@ -2042,6 +2042,7 @@ function _safeParse(str, fallback){
 /* ════════════════════════════════════════════════════════
    EXISTING safeReplacer — deep type guard (unchanged from V32)
    Used as second pass after _lockReplacer in all paths.
+════════════════════════════════════════════════════════ */
 function safeReplacer(key, val){
   // ── KEY-NAME FILTER: strip any property named 'controller', 'signal',
   //    'abortController', 'abortSignal' regardless of value type ──
@@ -2614,8 +2615,9 @@ async function _callAI_proxy(prompt, _model, maxTokens, log){
     })
   });
 
+  var timeoutId = null;
   var timeoutPromise = new Promise(function(_, reject){
-    setTimeout(function(){
+    timeoutId = setTimeout(function(){
       reject(new Error('PROXY_TIMEOUT: No response from '+PROXY_URL+' in '+PROXY_TIMEOUT_MS+'ms'));
     }, PROXY_TIMEOUT_MS);
   });
@@ -2623,7 +2625,9 @@ async function _callAI_proxy(prompt, _model, maxTokens, log){
   var res;
   try{
     res = await Promise.race([fetchPromise, timeoutPromise]);
+    try{clearTimeout(timeoutId);}catch(_){}
   }catch(fetchErr){
+    try{clearTimeout(timeoutId);}catch(_){}
     log('[PROXY] Request failed: '+fetchErr.message+' — falling back to offline', 'warn');
     return _callAI_offline(prompt, log);
   }
@@ -3491,7 +3495,7 @@ const E=(() => {
       const rawLines=out.split('\n').filter(l=>l.trim()).map(l=>l.replace(/^\d+\.\s*/,'').trim()).filter(l=>l.length>3);
       const seen=new Set();
       const lines=rawLines.filter(l=>{const key=l.toLowerCase().slice(0,20);if(seen.has(key))return false;seen.add(key);return true;}).slice(0,10);
-      const container=document.getElementById('niche-chips');container.style.display='flex';
+      const container=document.getElementById('niche-chips');if(!container){log('✗ #niche-chips element not found','error');return;}container.style.display='flex';
       container.innerHTML=lines.map(l=>`<div class="chip" onclick="E.selectNiche(this,'${escHtml(l)}')">${escHtml(l)}</div>`).join('');
       log('✓ '+lines.length+' sub-niches generated','success');toast(lines.length+' sub-niches ready!','ok');
     }catch(e){log('✗ Expand: '+e.message,'error');toast('Error: '+e.message.slice(0,60),'err');}
@@ -3506,7 +3510,7 @@ const E=(() => {
     const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;
     const niche=(document.getElementById('inp-niche')?.value||'EmpireOS').replace(/[^a-zA-Z0-9\u00C0-\u024F\s]/g,'').trim().replace(/\s+/g,'_').slice(0,30);
     const d=new Date();const ds=`${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
-    a.download=`CanvaBulk_${niche}_${ds}.csv`;a.click();URL.revokeObjectURL(url);
+    a.download=`CanvaBulk_${niche}_${ds}.csv`;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(url);try{document.body.removeChild(a);}catch(_){}},300);
     log('✓ CSV downloaded: '+csv.rows.length+' rows, '+csv.colCount+' cols','success');
     toast('CSV downloaded! ✓ Canva Bulk Ready','ok');
   }
@@ -4171,7 +4175,7 @@ async function runPipeline(){
     const _niEl=document.getElementById('inp-niche');
     const _niVal=(_niEl&&_niEl.value)?_niEl.value.trim():'';
     if(!_niVal){
-      try{E.toast('Please enter a Niche first!','err');}catch(_){}
+      try{E.log('⚠ AUTO PIPELINE — Niche field is empty. Please enter a Niche first.','warn');}catch(_){}
       try{if(_niEl){_niEl.classList.remove('input-error');void _niEl.offsetWidth;_niEl.classList.add('input-error');_niEl.addEventListener('animationend',()=>_niEl.classList.remove('input-error'),{once:true});_niEl.focus();}}catch(_){}
       return;
     }
