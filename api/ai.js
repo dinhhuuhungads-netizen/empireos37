@@ -1,79 +1,111 @@
-// /api/ai.js — Vercel Serverless Function
-// Proxies requests from HungAI EmpireOS frontend to Anthropic API.
-// Deploy: place this file at /api/ai.js in your Vercel project root.
-// Env var required: ANTHROPIC_KEY (set in Vercel dashboard → Settings → Environment Variables)
+// api/ai.js — Vercel Serverless Function
+// Proxies POST /api/ai → Anthropic API
+// Env var required: ANTHROPIC_API_KEY (set in Vercel dashboard → Settings → Environment Variables)
 
 export const config = {
-  maxDuration: 60, // seconds — Vercel Pro allows up to 300s, Hobby max 60s
+  maxDuration: 60, // seconds — Vercel Pro max 300s, Hobby max 60s
 };
 
 export default async function handler(req, res) {
-  // Only allow POST
+
+  // ── 1. Method guard ──────────────────────────────────────────────────────
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
+    return res.status(405).json({ error: 'Method Not Allowed. Use POST.' });
   }
 
-  const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY;
-  if (!ANTHROPIC_KEY) {
-    return res.status(500).json({ error: 'ANTHROPIC_KEY env var not set' });
+  // ── 2. API key guard ─────────────────────────────────────────────────────
+  const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  if (!ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: 'Server misconfiguration: ANTHROPIC_API_KEY env var is not set.' });
   }
 
-  // Parse body — Vercel automatically parses JSON bodies
-  const { prompt, maxTokens, stage, model } = req.body || {};
+  // ── 3. Parse body safely ─────────────────────────────────────────────────
+  // Vercel automatically parses JSON bodies when Content-Type is application/json
+  let body = req.body;
+
+  // Fallback: if body is a string (raw), parse it manually
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body);
+    } catch (_) {
+      return res.status(400).json({ error: 'Invalid JSON body.' });
+    }
+  }
+
+  if (!body || typeof body !== 'object') {
+    return res.status(400).json({ error: 'Request body is missing or not an object.' });
+  }
+
+  const { prompt, maxTokens, stage, model } = body;
 
   if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
-    return res.status(400).json({ error: 'Missing or empty prompt' });
+    return res.status(400).json({ error: 'Missing required field: prompt (non-empty string).' });
   }
 
-  const resolvedModel   = (typeof model === 'string' && model.trim()) ? model.trim() : 'claude-sonnet-4-20250514';
-  const resolvedTokens  = (typeof maxTokens === 'number' && maxTokens > 0 && maxTokens <= 8192) ? maxTokens : 4000;
+  // ── 4. Resolve model + token limits ─────────────────────────────────────
+  const resolvedModel  = (typeof model === 'string' && model.trim()) ? model.trim() : 'claude-sonnet-4-5';
+  const resolvedTokens = (typeof maxTokens === 'number' && maxTokens > 0 && maxTokens <= 8192)
+    ? maxTokens
+    : 4000;
 
-  // Build Anthropic request — no AbortController, no signal
-  const anthropicPayload = {
-    model:      resolvedModel,
-    max_tokens: resolvedTokens,
-    messages: [
-      { role: 'user', content: prompt.trim() }
-    ],
-  };
-
+  // ── 5. Call Anthropic API ────────────────────────────────────────────────
   let anthropicRes;
   try {
     anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method:  'POST',
+      method: 'POST',
       headers: {
         'Content-Type':      'application/json',
-        'x-api-key':         ANTHROPIC_KEY,
+        'x-api-key':         ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01',
       },
-      body: JSON.stringify(anthropicPayload),
+      body: JSON.stringify({
+        model:      resolvedModel,
+        max_tokens: resolvedTokens,
+        messages: [
+          { role: 'user', content: prompt.trim() }
+        ],
+      }),
     });
   } catch (networkErr) {
-    return res.status(502).json({ error: 'Network error reaching Anthropic: ' + networkErr.message });
+    return res.status(502).json({
+      error: 'Network error reaching Anthropic API: ' + networkErr.message,
+    });
   }
 
+  // ── 6. Handle non-OK response from Anthropic ────────────────────────────
   if (!anthropicRes.ok) {
-    let errMsg = 'Anthropic HTTP ' + anthropicRes.status;
+    let errMsg = 'Anthropic API error: HTTP ' + anthropicRes.status;
     try {
       const errJson = await anthropicRes.json();
-      errMsg = (errJson && errJson.error && errJson.error.message) ? errJson.error.message : errMsg;
-    } catch (_) {}
+      if (errJson && errJson.error && errJson.error.message) {
+        errMsg = errJson.error.message;
+      }
+    } catch (_) { /* keep default errMsg */ }
     return res.status(502).json({ error: errMsg });
   }
 
+  // ── 7. Parse Anthropic response ──────────────────────────────────────────
   let data;
   try {
     data = await anthropicRes.json();
   } catch (parseErr) {
-    return res.status(502).json({ error: 'Failed to parse Anthropic response' });
+    return res.status(502).json({ error: 'Failed to parse response from Anthropic API.' });
   }
 
-  // Extract text from Anthropic response
+  // ── 8. Extract text content ──────────────────────────────────────────────
   const text =
-    (data && data.content && Array.isArray(data.content) && data.content[0] && data.content[0].text)
+    (data &&
+     Array.isArray(data.content) &&
+     data.content[0] &&
+     data.content[0].type === 'text' &&
+     data.content[0].text)
       ? data.content[0].text
       : '';
 
-  // Return JSON only — shape matches what _callAI_proxy expects: { text }
-  return res.status(200).json({ text, stage: stage || null });
+  // ── 9. Return JSON to frontend ───────────────────────────────────────────
+  // Shape: { text, stage } — matches what _callAI_proxy expects
+  return res.status(200).json({
+    text,
+    stage: stage || null,
+  });
 }
