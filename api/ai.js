@@ -1,89 +1,226 @@
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║  /api/ai.js  —  Universal AI Proxy for Vercel                      ║
+// ║  Providers: Gemini · OpenAI · Claude · OpenRouter · Groq           ║
+// ║  POST { prompt, provider } → { text }                              ║
+// ╚══════════════════════════════════════════════════════════════════════╝
+
 export const config = {
-  maxDuration: 60,
+  maxDuration: 60, // seconds — increase to 300 on Vercel Pro if needed
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PROVIDER DEFINITIONS
+// Each entry: envKey, buildRequest(prompt, key), extractText(data)
+// To add a new provider: append one object here — nothing else to change.
+// ─────────────────────────────────────────────────────────────────────────────
+const PROVIDERS = {
+
+  // ── Google Gemini ─────────────────────────────────────────────────────────
+  gemini: {
+    envKey: 'GEMINI_API_KEY',
+    buildRequest(prompt, key) {
+      return {
+        url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${key}`,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+        }),
+      };
+    },
+    extractText(data) {
+      return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    },
+  },
+
+  // ── OpenAI ────────────────────────────────────────────────────────────────
+  openai: {
+    envKey: 'OPENAI_API_KEY',
+    buildRequest(prompt, key) {
+      return {
+        url: 'https://api.openai.com/v1/chat/completions',
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          model:      'gpt-4o-mini',
+          max_tokens: 4096,
+          messages:   [{ role: 'user', content: prompt }],
+        }),
+      };
+    },
+    extractText(data) {
+      return data?.choices?.[0]?.message?.content ?? '';
+    },
+  },
+
+  // ── Anthropic Claude ──────────────────────────────────────────────────────
+  claude: {
+    envKey: 'ANTHROPIC_API_KEY',
+    buildRequest(prompt, key) {
+      return {
+        url: 'https://api.anthropic.com/v1/messages',
+        headers: {
+          'Content-Type':      'application/json',
+          'x-api-key':         key,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model:      'claude-3-5-sonnet-20240620',
+          max_tokens: 4096,
+          messages:   [{ role: 'user', content: prompt }],
+        }),
+      };
+    },
+    extractText(data) {
+      if (!Array.isArray(data?.content)) return '';
+      const block = data.content.find(b => b.type === 'text');
+      return block?.text ?? '';
+    },
+  },
+
+  // ── OpenRouter ────────────────────────────────────────────────────────────
+  openrouter: {
+    envKey: 'OPENROUTER_API_KEY',
+    buildRequest(prompt, key) {
+      return {
+        url: 'https://openrouter.ai/api/v1/chat/completions',
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${key}`,
+          'HTTP-Referer':  'https://vercel.app',
+          'X-Title':       'AI Proxy',
+        },
+        body: JSON.stringify({
+          model:    'google/gemini-2.0-flash-exp:free',
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      };
+    },
+    extractText(data) {
+      return data?.choices?.[0]?.message?.content ?? '';
+    },
+  },
+
+  // ── Groq ──────────────────────────────────────────────────────────────────
+  groq: {
+    envKey: 'GROQ_API_KEY',
+    buildRequest(prompt, key) {
+      return {
+        url: 'https://api.groq.com/openai/v1/chat/completions',
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          model:      'llama-3.3-70b-versatile',
+          max_tokens: 4096,
+          messages:   [{ role: 'user', content: prompt }],
+        }),
+      };
+    },
+    extractText(data) {
+      return data?.choices?.[0]?.message?.content ?? '';
+    },
+  },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HANDLER
+// ─────────────────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-  // CORS headers — allow Vercel preview URLs and custom domains
-  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  // CORS — tighten to your domain in production if needed
+  res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Handle CORS preflight
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST')    return res.status(405).json({ error: 'Method Not Allowed — use POST' });
 
-  // Only allow POST
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
-  }
-
-  // Read API key
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) {
-    return res.status(500).json({ error: 'ANTHROPIC_API_KEY is not set in environment variables' });
-  }
-
-  // Read prompt from body
-  // Vercel parses JSON body automatically — no bodyParser needed
-  let prompt = '';
+  // ── 1. Parse body ──────────────────────────────────────────────────────────
+  let body;
   try {
-    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    prompt = (body && typeof body.prompt === 'string') ? body.prompt.trim() : '';
+    body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
   } catch (e) {
-    return res.status(400).json({ error: 'Could not parse request body: ' + e.message });
+    return res.status(400).json({ error: 'Invalid JSON body: ' + e.message });
   }
+
+  if (!body || typeof body !== 'object') {
+    return res.status(400).json({ error: 'Request body must be a JSON object' });
+  }
+
+  // ── 2. Validate inputs ────────────────────────────────────────────────────
+  const prompt   = typeof body.prompt   === 'string' ? body.prompt.trim()            : '';
+  const provider = typeof body.provider === 'string' ? body.provider.trim().toLowerCase() : 'claude';
 
   if (!prompt) {
-    return res.status(400).json({ error: 'Missing prompt in request body' });
+    return res.status(400).json({ error: 'Missing required field: prompt (non-empty string)' });
   }
 
-  // Call Anthropic
-  let raw;
-  try {
-    raw = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key':         key,
-        'anthropic-version': '2023-06-01',
-        'content-type':      'application/json',
-      },
-      body: JSON.stringify({
-        model:      'claude-3-5-sonnet-20240620',
-        max_tokens: 1000,
-        messages:   [{ role: 'user', content: prompt }],
-      }),
+  // ── 3. Resolve provider ───────────────────────────────────────────────────
+  const def = PROVIDERS[provider];
+  if (!def) {
+    return res.status(400).json({
+      error: `Unknown provider "${provider}". Supported: ${Object.keys(PROVIDERS).join(', ')}`,
     });
+  }
+
+  // ── 4. Resolve API key ────────────────────────────────────────────────────
+  const key = process.env[def.envKey];
+  if (!key) {
+    return res.status(500).json({
+      error: `Server misconfiguration: env var "${def.envKey}" is not set in Vercel Environment Variables`,
+    });
+  }
+
+  // ── 5. Build + fire request ───────────────────────────────────────────────
+  let cfg, rawRes;
+  try {
+    cfg    = def.buildRequest(prompt, key);
+    rawRes = await fetch(cfg.url, { method: 'POST', headers: cfg.headers, body: cfg.body });
   } catch (e) {
-    return res.status(502).json({ error: 'Failed to reach Anthropic API: ' + e.message });
+    return res.status(502).json({ error: `Network error calling ${provider}: ${e.message}` });
   }
 
-  // Forward non-OK errors from Anthropic
-  if (!raw.ok) {
-    let detail = 'HTTP ' + raw.status;
+  // ── 6. Handle upstream errors ─────────────────────────────────────────────
+  if (!rawRes.ok) {
+    let detail = `HTTP ${rawRes.status}`;
     try {
-      const j = await raw.json();
-      detail = (j && j.error && j.error.message) ? j.error.message : detail;
-    } catch (_) {}
-    return res.status(502).json({ error: 'Anthropic error: ' + detail });
+      const j = await rawRes.json();
+      // Normalise across different provider error shapes
+      detail =
+        j?.error?.message    ??   // OpenAI / Claude / Groq
+        j?.error?.status     ??   // OpenRouter
+        j?.message           ??   // generic REST
+        j?.status_message    ??   // some providers
+        JSON.stringify(j).slice(0, 200);
+    } catch (_) { /* keep HTTP status string */ }
+    return res.status(502).json({ error: `${provider} API error: ${detail}` });
   }
 
-  // Parse response
+  // ── 7. Parse response ─────────────────────────────────────────────────────
   let data;
   try {
-    data = await raw.json();
+    data = await rawRes.json();
   } catch (e) {
-    return res.status(502).json({ error: 'Failed to parse Anthropic response: ' + e.message });
+    return res.status(502).json({ error: `Failed to parse ${provider} response: ${e.message}` });
   }
 
-  // Extract text
-  const text =
-    data &&
-    Array.isArray(data.content) &&
-    data.content[0] &&
-    data.content[0].type === 'text'
-      ? data.content[0].text
-      : '';
+  // ── 8. Extract text ───────────────────────────────────────────────────────
+  let text = '';
+  try {
+    text = def.extractText(data) ?? '';
+  } catch (e) {
+    return res.status(502).json({ error: `Failed to read text from ${provider} response: ${e.message}` });
+  }
 
+  if (!text.trim()) {
+    return res.status(502).json({
+      error: `${provider} returned empty content. Raw: ${JSON.stringify(data).slice(0, 300)}`,
+    });
+  }
+
+  // ── 9. Return ─────────────────────────────────────────────────────────────
   return res.status(200).json({ text });
 }
