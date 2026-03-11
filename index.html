@@ -1319,6 +1319,22 @@ body::before{
 </style>
 </head>
 <body>
+   <body onload="checkHungAIPassword(); E.init();">
+  <script>
+    function checkHungAIPassword() {
+      const PASS = "Huuhung86"; // Boss đổi mật khẩu ở đây
+      if (sessionStorage.getItem("hungai_auth") !== "true") {
+        const input = prompt("🔐 HUNG AI | EMPIRE OS 37\nNhập mật khẩu để vận hành hệ thống:");
+        if (input === PASS) {
+          sessionStorage.setItem("hungai_auth", "true");
+        } else {
+          alert("❌ Sai mật khẩu!");
+          document.body.innerHTML = "<div style='background:#000;color:#FFD700;height:100vh;display:flex;align-items:center;justify-content:center;font-family:sans-serif;'><h1>⚠️ TRUY CẬP BỊ TỪ CHỐI</h1></div>";
+          window.stop();
+        }
+      }
+    }
+  </script>
 <div id="toasts"></div>
 <!-- FLOATING EMERGENCY STOP — visible only during AI runs -->
 <button id="float-stop-btn" onclick="E.stopAll()" title="Emergency Stop — aborts fetch immediately">
